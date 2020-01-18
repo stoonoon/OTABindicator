@@ -4,10 +4,11 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
+#include "my_wifi_network.h"
 
 #ifndef STASSID
-#define STASSID "TurkWheela"
-#define STAPSK  "getmetothepubontime"
+#define STASSID "your-SSID-goes-here"
+#define STAPSK  "your-PSK-goes-here"
 #endif
 
 // For LCD panel
@@ -29,7 +30,7 @@
 
 // For debugging
 // make true to debug, false to not
-#define DEBUG true
+#define DEBUG false
 
 // conditional debugging
 #if DEBUG 
@@ -45,6 +46,7 @@
 #else
   #define beginDebug()  ((void) 0)
   #define Trace(x)      ((void) 0)
+  #define Tracef(x, y)  ((void) 0)
   #define Trace2(x,y)   ((void) 0)
   #define Traceln(x)    ((void) 0)
   #define Traceln2(x,y) ((void) 0)
@@ -64,7 +66,7 @@ const char* password = STAPSK;
 const IPAddress json_server(192,168,1,206);
 const int json_port = 1880;
 const PROGMEM char json_path[] = "/bin_info";
-char json_buffer[600];
+char json_buffer[1200];
 
 const int max_collection_dates = 10; // max number of dates which we expect to store data for
 const int max_collection_strings_per_date = 4;
@@ -117,30 +119,34 @@ const int serverUpdateRetryDelay = 2 * SEC_IN_MILLIS;
 
 void timezoneSetup() {  // uncomment this at some point. 
   TraceFunc();
-  Traceln(F("REMINDER : TIMEZONE SETUP STUFF NOT IMPLEMENTED YET"));
+  // Traceln(F("REMINDER : TIMEZONE SETUP STUFF NOT IMPLEMENTED YET"));
   // Makes no difference until BST kicks in, and it's throwing
   // errors in VScode as it doesn't seem to understand that the code will be running on linux,
   // and so setenv and tzset are valid. 
 
-  // time_t rtc_time_t = 1541267183; // fake RTC time for now
-  // timezone tz = { 0, 0}; // clear offsets as per https://github.com/esp8266/Arduino/issues/4637#issuecomment-435611842
-  // timeval tv = { rtc_time_t, 0};
-  // settimeofday(&tv, &tz);
-  // setenv(F("TZ"), F("GMT0BST,M3.5.0/1:00:00,M10.5.0/2:00:002"), 1);
-  // tzset(); // save the TZ variable  
+  time_t rtc_time_t = 1541267183; // fake RTC time for now
+  timezone tz = { 0, 0}; // clear offsets as per https://github.com/esp8266/Arduino/issues/4637#issuecomment-435611842
+  timeval tv = { rtc_time_t, 0};
+  settimeofday(&tv, &tz);
+  // the next two lines throw "identifier is undefined" errors in vscode, but
+  // still compiles and runs OK.
+  setenv("TZ", "GMT0BST,M3.5.0/1:00:00,M10.5.0/2:00:002", 1);
+  tzset(); // save the TZ variable  
 }
 
 void wifiSetup() {
   //TraceFunc();
   lcd.print(F("Booting WiFi: "));
   WiFi.mode(WIFI_STA);
+  bool wifi_ok = true;
   WiFi.begin(ssid, password);
   while (WiFi.waitForConnectResult() != WL_CONNECTED) {
     Traceln(F("Connection Failed! Rebooting..."));
-    lcd.println(F("Connection Failed!\n\n"));
+    lcd.println(F("Connection Failed!"));
     delay(5000);
     ESP.restart();
   }//while
+  
   ArduinoOTA.onStart([]() {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
@@ -618,11 +624,8 @@ bool updateDisplay(void *) {
     // Check collection date isn't in the past
     time_t now = time(NULL);
     if (this_day.collection_time_t > now) {
-      // Check this isn't a garden collection
-      if (strcmp(this_day.collection[0], "Garden") !=0) {
-        addCollectionToLCD(current_display_line, this_day);
-        first_collection = false;
-      }
+      addCollectionToLCD(current_display_line, this_day);
+      first_collection = false;
     }
   } // for (collection_day_data collection_day:local_bin_data_array)
   
