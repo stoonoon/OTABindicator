@@ -106,6 +106,11 @@ bool text_blink_is_on = true;
 bool alarm_active = false; 
 
 auto timer = timer_create_default();
+const int SEC_IN_MILLIS = 1000;
+const unsigned long HOUR_IN_MILLIS = SEC_IN_MILLIS * 60 * 60;
+const unsigned long DAY_IN_MILLIS = HOUR_IN_MILLIS * 24;
+const int serverUpdateRetryDelay = 2 * SEC_IN_MILLIS;
+  
 
 // end of globals
 
@@ -597,7 +602,7 @@ void updateAlarmState() {
 }
 
 bool updateDisplay(void *) {
-  TraceFunc();
+  // note: this function runs every second.... careful with any debug traces!
   updateAlarmState();
   updateLCDclockBuffer();
   int current_display_line = 1; // row of LCD to print next
@@ -626,19 +631,44 @@ bool updateDisplay(void *) {
   return true; // keep timer alive
 } // updateDisplay
 
-bool bindicatorUpdater(void *) {
-  //TraceFunc();
-  if (getBinDataJsonString()) {
+bool getUpdateFromServer() {
+   if (getBinDataJsonString()) {
     if (parseJSONbuffer()) {
       updateDisplay(NULL);
     }
     else {
       Traceln(F("parseJSONbuffer failed."));
+      return false;
     }    
   }
   else {
     Traceln(F("bindicatorUpdater failed"));
+    return false;
   }
+  return true;
+}
+
+bool getUpdateRetry(void *) {
+  if (getUpdateFromServer()) {
+    Traceln(F("Update from server successful"));
+    return false; // kill retry timer
+  }
+  else {
+    Traceln(F("Retrying..."));
+    return true; // keep retry timer alive
+  }
+}
+
+bool bindicatorUpdater(void *) {
+  //TraceFunc();
+  if (getUpdateFromServer()) {
+    Traceln(F("Update from server successful"));
+  }
+  else {
+    Traceln(F("Retrying..."));
+    timer.every(serverUpdateRetryDelay, getUpdateRetry);
+  }
+    
   return true; // keep timer alive
 } // bindicatorUpdater
 
@@ -707,15 +737,11 @@ void setup() {
   debouncer.attach(BUTTON_PIN);
   debouncer.interval(25); // interval in ms
 
-  const int SEC_IN_MILLIS = 1000;
-  const unsigned long HOUR_IN_MILLIS = SEC_IN_MILLIS * 60 * 60;
-  const unsigned long DAY_IN_MILLIS = HOUR_IN_MILLIS * 24;
   timer.in(1, getNTPtime); // initial sync with NTP
   timer.every(DAY_IN_MILLIS, getNTPtime); // then update NTP every day
-  //timer.every(SEC_IN_MILLIS, updateLCDclockBuffer); // update clock and refresh screen every second
   timer.every(SEC_IN_MILLIS, updateDisplay); // refresh screen every second
-  timer.in(1*SEC_IN_MILLIS, bindicatorUpdater); // refresh bin list every 15s
-  timer.every(60*SEC_IN_MILLIS, bindicatorUpdater); // refresh bin list every 15s
+  timer.in(1*SEC_IN_MILLIS, bindicatorUpdater); // initial get bin list 
+  timer.every(60*SEC_IN_MILLIS, bindicatorUpdater); // refresh bin list every 60s
   lcd.clear();
   lcd.print(F("Bindicator loading.."));
   Traceln(F("setup() is done"));
