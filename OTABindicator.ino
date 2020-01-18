@@ -96,12 +96,14 @@ char lcd_buffer_prev[lcd_rows][lcd_cols];
 
 // For alarm function
 Bounce debouncer = Bounce();
-time_t next_collection_time = -1;
+int buttonState;
+unsigned long buttonPressTimeStamp;
+time_t next_collection_time = -1; // time the next collection is due
+time_t last_snooze_time = -1; // time the snooze button was last pressed
+int alarm_advance_hours = 24; // how many hours before next collection to trigger the alarm
 bool backlight_is_on = true;
 bool text_blink_is_on = true;
-bool alarm_active = true; // prob want to default this to false once tested
-
-
+bool alarm_active = false; 
 
 auto timer = timer_create_default();
 
@@ -531,7 +533,7 @@ void setBacklight(bool action) {
   }  
 }
 
-void alarm_update() {
+void updateAlarmDisplay() {
   if (alarm_active) {
     time_t rawtime = time(NULL);
     struct tm * timeinfo;
@@ -573,8 +575,30 @@ void pushBuffertoLCD() {
   }
 }
 
+void updateAlarmState() {
+  time_t timenow = time(NULL);
+  
+  // Set alarm start to <alarm_advance_hours> before next_collection_time
+  struct tm* tm = localtime(&next_collection_time);
+  tm->tm_hour -= alarm_advance_hours;
+  time_t alarm_start = mktime(tm);
+
+  if (timenow > alarm_start) {
+    // then collection due within 24h of now
+    if (alarm_start > last_snooze_time) {
+        // Show the alarm
+        alarm_active = true;
+    }
+  }
+  else {
+    // no collection within 24hours
+    alarm_active =false;
+  }
+}
+
 bool updateDisplay(void *) {
   TraceFunc();
+  updateAlarmState();
   updateLCDclockBuffer();
   int current_display_line = 1; // row of LCD to print next
   bool first_collection = true; // so we can blink the imminent collection only
@@ -584,7 +608,7 @@ bool updateDisplay(void *) {
   //for (collection_day_data collection_day:local_bin_data_array) {
     collection_day_data this_day = local_bin_data_array[i];
     if (first_collection) {
-      alarm_update();
+      updateAlarmDisplay();
     }
     // Check collection date isn't in the past
     time_t now = time(NULL);
@@ -619,14 +643,48 @@ bool bindicatorUpdater(void *) {
 } // bindicatorUpdater
 
 void buttonHandler() {
-  // check for button press and act accordingly
-  debouncer.update();
-  if (debouncer.fell()) {
-    Traceln("Button press detected");
-    //toggleBacklight();
-    alarm_active = !alarm_active;
-    setBacklight(!alarm_active);
+  // Update the debouncer and get the changed state
+  boolean changed = debouncer.update();
+
+  if (changed) {
+    // Get the update value
+    int value = debouncer.read();
+    if ( value == HIGH) {
+      buttonState = 0;
+      Serial.println("Button released (state 0)");
+    }
+    else {
+      Traceln("Button press detected");
+      if (alarm_active) {
+        // 'silence' alarm, but leave display on
+        alarm_active = false;
+        setBacklight(true);
+        // update last_snooze_time to now
+        last_snooze_time = time(NULL);
+      }
+      else {
+        // alarm wasn't on - so just toggle backlight
+        toggleBacklight();
+      }
+      buttonState = 1;
+      buttonPressTimeStamp = millis();
+    }
   }
+  if  ( buttonState == 1 ) {
+    if ( millis() - buttonPressTimeStamp >= 1000 ) {
+      Traceln(F("Long press detected - re-arming alarm"));
+      buttonPressTimeStamp = millis();
+      alarm_active = true;
+      last_snooze_time = -1;
+      int flash_millis = 250;
+      int flash_count = 4;
+      for (int i=0; i<flash_count; i++) {
+        toggleBacklight();
+        delay(flash_millis);
+      }
+    }
+  }
+
 }
 
 void setup() {
