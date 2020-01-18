@@ -23,7 +23,8 @@
 
 // For button debouncing
 #include <Bounce2.h>
-#define BUTTON_PIN 2 // D4 / GPIO2
+//#define BUTTON_PIN 2 // D4 / GPIO2
+#define BUTTON_PIN 0 // D3 / GPIO0
 
 
 // For debugging
@@ -50,9 +51,11 @@
   #define TraceFunc()   ((void) 0)
 #endif // DEBUG
 
-  
+#define MIN(a,b) ((a < b) ? a : b)
+    
 
-
+// dummy json string to test deserialization and parsing
+const PROGMEM char test_json_str[] = "[{\"date\": \"16/01/2020\", \"bins\": [\"Household waste\"]}, {\"date\": \"22/01/2020\", \"bins\": [\"Chargeable garden waste\"]}, {\"date\": \"23/01/2020\", \"bins\": [\"Black box or basket recycling\", \"Mixed dry recycling (blue lidded bin)\"]}, {\"date\": \"30/01/2020\", \"bins\": [\"Household waste\"]}]";
 const bool use_test_string = false;
 
 const char* ssid = STASSID;
@@ -65,7 +68,7 @@ char json_buffer[600];
 
 const int max_collection_dates = 10; // max number of dates which we expect to store data for
 const int max_collection_strings_per_date = 4;
-const int max_characters_per_collection_string = 20;
+const int max_characters_per_collection_string = 9;
 const int max_date_string_length = 9;
 
 
@@ -79,8 +82,6 @@ typedef struct collection_day_data {
 collection_day_data local_bin_data_array[max_collection_dates];
 int collection_day_count = 0; // how many dates we have info for
 
-// dummy json string to test deserialization and parsing
-const PROGMEM char test_json_str[] = "[{\"date\": \"16/01/2020\", \"bins\": [\"Household waste\"]}, {\"date\": \"22/01/2020\", \"bins\": [\"Chargeable garden waste\"]}, {\"date\": \"23/01/2020\", \"bins\": [\"Black box or basket recycling\", \"Mixed dry recycling (blue lidded bin)\"]}, {\"date\": \"30/01/2020\", \"bins\": [\"Household waste\"]}]";
 
 // SCL on screen connected to D1 on Wemos
 // SDA on screen connected to D2 on Wemos
@@ -90,11 +91,15 @@ const int lcd_cols=20;
 const int lcd_rows=4;
 const int lcd_addr=0x27;
 LiquidCrystal_I2C lcd(lcd_addr,lcd_cols,lcd_rows);  // set the LCD address to 0x27 for a 16 chars and 2 line display
+char lcd_buffer[lcd_rows][lcd_cols];
+char lcd_buffer_prev[lcd_rows][lcd_cols];
 
 // For alarm function
 Bounce debouncer = Bounce();
 time_t next_collection_time = -1;
 bool backlight_is_on = true;
+bool text_blink_is_on = true;
+bool alarm_active = true; // prob want to default this to false once tested
 
 
 
@@ -198,18 +203,6 @@ bool getNTPtime(void *) {
   //TraceFunc();
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");// will need to sort out timezone & DST settings here!
   return true; // keep timer alive?
-}
-
-bool updateLCDclock(void *) {
-  // updates date/time display on top row of LCD screen
-  // NB - runs every second... no debug code here!!
-  time_t timenow = time(NULL);
-  struct tm * timeinfo = localtime (&timenow);
-  char buffer[21];
-  strftime(buffer, sizeof(buffer), "%a %b %d %H:%M:%S ", timeinfo);
-  lcd.setCursor(0,0);
-  lcd.print(buffer);
-  return true; // keep timer alive
 }
 
 bool getBinDataJsonString() {
@@ -434,20 +427,43 @@ bool parseJSONbuffer() {
   return true;
 }//parseJSONbuffer
 
+void wipeLCDBuffer(int row, int start_col=0, int maxlen=lcd_cols) {
+  //wipes chars from lcd_buffer, starting from specified
+  //row and col, continues until end of row, or maxlen reached
+  
+  int wipe_chars = MIN(maxlen, (lcd_cols-start_col));
+  for (int i = start_col; i < (start_col + wipe_chars); i++) {
+    lcd_buffer[row][i]=' ';
+  }
+}//wipeLCDBuffer
+
+void strToLCDBuffer(char* str, int start_row=0, int start_col=0,
+                  int maxlen=lcd_cols) {
+  // copies (upto) maxlen characters from str into lcd_buffer,
+  // starting at [row][col] and continues until end of row, 
+  // end of str, or maxlen is reached
+  
+  int in_len = MIN(strlen(str), maxlen);
+  int out_len = lcd_cols - start_col;
+  int copy_len = MIN(in_len, out_len);
+  for (int i=0; i<copy_len; i++) {
+    lcd_buffer[start_row][i+start_col] = str[i];
+  }
+}//strToLCDBuffer
+
 void addCollectionToLCD(int &current_display_line, collection_day_data &this_day) {
   // Check we haven't already filled the screen
   if (current_display_line<lcd_rows) {
-
+    // wipe row from buffer
+    wipeLCDBuffer(current_display_line, 0, lcd_cols);
     // Check we actually have something to parse in the date string
     if (strcmp(this_day.date_string, "") != 0) {
-      
-      // print date string to LCD
-      lcd.setCursor(0, current_display_line);
-      lcd.print(this_day.date_string);
-      
-      // print collection string for 1st collection
-      lcd.setCursor(10, current_display_line);
-      lcd.print(this_day.collection[0]);
+      if (text_blink_is_on or (current_display_line > 1)) {
+        // copy date string to LCD buffer
+        strToLCDBuffer(this_day.date_string, current_display_line, 0);
+        // copy 1st collection string to buffer
+        strToLCDBuffer(this_day.collection[0], current_display_line, 10);
+      }
 
       // this LCD line is now full
       current_display_line++;
@@ -457,14 +473,12 @@ void addCollectionToLCD(int &current_display_line, collection_day_data &this_day
 
         // check if there is a 2nd collection on this day
         if (this_day.collection_count > 1) {
-          lcd.setCursor(0, current_display_line);
-          lcd.print(this_day.collection[1]);
-
+          strToLCDBuffer(this_day.collection[1], current_display_line, 0);
+          
           // check if there is a 3rd collection on this day
           if (this_day.collection_count > 2) {
-            lcd.setCursor(10, current_display_line);
-            lcd.print(this_day.collection[2]);
-            }
+            strToLCDBuffer(this_day.collection[2], current_display_line, 10);
+          }
           
           // no more data to go on this LCD row
           current_display_line++;
@@ -472,6 +486,17 @@ void addCollectionToLCD(int &current_display_line, collection_day_data &this_day
       } // if (current_display_line<lcd_rows)
     } // if (strcmp(collection_day.date_string, "") != 0)
   } // if (current_display_line<lcd_rows)
+}
+
+void updateLCDclockBuffer() {
+  // updates date/time display on top row of LCD screen
+  // NB - runs every second... no debug code here!!
+  time_t timenow = time(NULL);
+  struct tm * timeinfo = localtime (&timenow);
+  char clockStrBuffer[21];
+  strftime(clockStrBuffer, sizeof(clockStrBuffer), "%a %b %d %H:%M:%S ", timeinfo);
+  strToLCDBuffer(clockStrBuffer, 0, 0);
+  //return true; // keep timer alive
 }
 
 void updateNextCollectionTime(time_t coll_time) {
@@ -488,46 +513,103 @@ void updateNextCollectionTime(time_t coll_time) {
 
 void toggleBacklight() {
   if (backlight_is_on) {
-    lcd.noBacklight();
-    backlight_is_on = false;
+    setBacklight(false);
   }
   else {
+    setBacklight(true);
+  }  
+}
+
+void setBacklight(bool action) {
+  if (action) {
     lcd.backlight();
     backlight_is_on = true;
   }
+  else {
+    lcd.noBacklight(); // turn backlight on
+    backlight_is_on = false;
+  }  
 }
 
-void updateDisplay() {
-  TraceFunc();
-  lcd.clear();
-  updateLCDclock(nullptr);
+void alarm_update() {
+  if (alarm_active) {
+    time_t rawtime = time(NULL);
+    struct tm * timeinfo;
+    time (&rawtime);
+    timeinfo = localtime(&rawtime);
+    int phase = timeinfo->tm_sec;
+    phase = phase % 4;
+    if (phase == 1) {
+      text_blink_is_on = false;
+    }
+    else {
+      text_blink_is_on = true;
+    }
+    if (phase == 3) {
+      setBacklight(false);
+    }
+    else {
+      setBacklight(true);
+    }
+  }
+}
+
+void pushBuffertoLCD() {
+  //push buffer to LCD
+  // for (int row=0; row<lcd_rows; row++) {
+  //   lcd.setCursor(0, row);
+  //   lcd.print(lcd_buffer[row]);
+  // }
   
-  int current_display_line = 1;
+  // only push characters that have changed
+  for (int row=0; row<lcd_rows; row++) {
+    for (int col=0; col<lcd_cols; col++) {
+      if (lcd_buffer[row][col] != lcd_buffer_prev[row][col]) {
+        lcd.setCursor(col, row);
+        lcd.print(lcd_buffer[row][col]);
+        lcd_buffer_prev[row][col] = lcd_buffer[row][col];
+      }
+    }
+  }
+}
+
+bool updateDisplay(void *) {
+  TraceFunc();
+  updateLCDclockBuffer();
+  int current_display_line = 1; // row of LCD to print next
+  bool first_collection = true; // so we can blink the imminent collection only
 
   // Iterate over all the collection dates we have information for
   for (int i=0; i < collection_day_count; i++) {
   //for (collection_day_data collection_day:local_bin_data_array) {
     collection_day_data this_day = local_bin_data_array[i];
-    
+    if (first_collection) {
+      alarm_update();
+    }
     // Check collection date isn't in the past
     time_t now = time(NULL);
     if (this_day.collection_time_t > now) {
       // Check this isn't a garden collection
       if (strcmp(this_day.collection[0], "Garden") !=0) {
         addCollectionToLCD(current_display_line, this_day);
+        first_collection = false;
       }
     }
   } // for (collection_day_data collection_day:local_bin_data_array)
+  
+  pushBuffertoLCD();
+
+  return true; // keep timer alive
 } // updateDisplay
 
 bool bindicatorUpdater(void *) {
   //TraceFunc();
   if (getBinDataJsonString()) {
     if (parseJSONbuffer()) {
-      updateDisplay();
+      updateDisplay(NULL);
     }
     else {
-      Traceln(F("parseJSONbuffer failed. Skipping updateDisplay()"));
+      Traceln(F("parseJSONbuffer failed."));
     }    
   }
   else {
@@ -541,7 +623,9 @@ void buttonHandler() {
   debouncer.update();
   if (debouncer.fell()) {
     Traceln("Button press detected");
-    toggleBacklight();
+    //toggleBacklight();
+    alarm_active = !alarm_active;
+    setBacklight(!alarm_active);
   }
 }
 
@@ -550,6 +634,12 @@ void setup() {
   TraceFunc();
   lcd.init();
   lcd.backlight();
+  for (int i; i<lcd_rows; i++) {
+    for (int j; j<lcd_cols; j++) {
+      lcd_buffer[i][j] = ' ';
+      lcd_buffer_prev[i][j] = ' ';
+    }
+  }
   timezoneSetup();
   wifiSetup();
   delay(2000);//pause to show wifi config
@@ -564,7 +654,8 @@ void setup() {
   const unsigned long DAY_IN_MILLIS = HOUR_IN_MILLIS * 24;
   timer.in(1, getNTPtime); // initial sync with NTP
   timer.every(DAY_IN_MILLIS, getNTPtime); // then update NTP every day
-  timer.every(SEC_IN_MILLIS, updateLCDclock); // refresh screen clock every second
+  //timer.every(SEC_IN_MILLIS, updateLCDclockBuffer); // update clock and refresh screen every second
+  timer.every(SEC_IN_MILLIS, updateDisplay); // refresh screen every second
   timer.in(1*SEC_IN_MILLIS, bindicatorUpdater); // refresh bin list every 15s
   timer.every(60*SEC_IN_MILLIS, bindicatorUpdater); // refresh bin list every 15s
   lcd.clear();
