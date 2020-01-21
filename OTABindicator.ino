@@ -507,7 +507,10 @@ void updateLCDclockBuffer() {
   time_t timenow = time(NULL);
   struct tm * timeinfo = localtime (&timenow);
   char clockStrBuffer[21];
-  strftime(clockStrBuffer, sizeof(clockStrBuffer), "%a %b %d %H:%M:%S ", timeinfo);
+  //with seconds
+  //strftime(clockStrBuffer, sizeof(clockStrBuffer), "%a %b %d %H:%M:%S ", timeinfo);
+  //without seconds
+  strftime(clockStrBuffer, sizeof(clockStrBuffer), "%a %b %d     %H:%M", timeinfo);
   strToLCDBuffer(clockStrBuffer, 0, 0);
   //return true; // keep timer alive
 }
